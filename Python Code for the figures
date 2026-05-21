@@ -1,0 +1,145 @@
+import os
+import shutil
+import numpy as np
+import matplotlib.pyplot as plt
+from google.colab import files
+
+# 1. Setup Export Directory
+FIG_DIR = 'rgb_game_figures_paper1_v2'
+os.makedirs(FIG_DIR, exist_ok=True)
+
+def save_fig(fig_id):
+    plt.tight_layout()
+    filepath = os.path.join(FIG_DIR, f"{fig_id}.png")
+    plt.savefig(filepath, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved: {filepath}")
+
+# 2. Generate Synthetic RGB Data
+N = 100
+clean_image = np.zeros((N, N, 3))
+clean_image[20:70, 20:70, 0] = 1.0  # Red
+clean_image[35:85, 35:85, 1] = 1.0  # Green
+clean_image[15:55, 45:90, 2] = 1.0  # Blue
+
+np.random.seed(42)
+noisy_image = clean_image + 0.3 * np.random.randn(N, N, 3)
+noisy_image = np.clip(noisy_image, 0, 1)
+
+# 3. Finite Difference Operators
+def grad(u):
+    gx = np.roll(u, -1, axis=1) - u
+    gy = np.roll(u, -1, axis=0) - u
+    return gx, gy
+
+def div(px, py):
+    dx = px - np.roll(px, 1, axis=1)
+    dy = py - np.roll(py, 1, axis=0)
+    return dx + dy
+
+def laplacian(u):
+    gx, gy = grad(u)
+    return div(gx, gy)
+
+def compute_energy(u, I, lam, eps, gamma, ch):
+    ui = u[:, :, ch]; Ii = I[:, :, ch]
+    data_fid = 0.5 * lam * np.sum((ui - Ii)**2)
+    gx, gy = grad(ui)
+    tv = np.sum(np.sqrt(gx**2 + gy**2 + eps**2))
+    coupling = 0.0
+    for j in range(3):
+        if j != ch:
+            gxj, gyj = grad(u[:, :, j])
+            coupling += 0.5 * gamma * np.sum((gx - gxj)**2 + (gy - gyj)**2)
+    return data_fid + tv + coupling
+
+# 4. PDE Nash Equilibrium Solver with Snapshot Tracking
+def solve_rgb_game(I, iters=300, dt=0.05, lam=2.0, eps=1e-5, gamma=1.5):
+    u = np.copy(I)
+    energies = {'R': [], 'G': [], 'B': []}
+    snapshots = {0: np.copy(u)} # Save initial state
+    
+    for k in range(1, iters + 1):
+        uR, uG, uB = u[:,:,0], u[:,:,1], u[:,:,2]
+        
+        gxR, gyR = grad(uR); normR = np.sqrt(gxR**2 + gyR**2 + eps**2)
+        gxG, gyG = grad(uG); normG = np.sqrt(gxG**2 + gyG**2 + eps**2)
+        gxB, gyB = grad(uB); normB = np.sqrt(gxB**2 + gyB**2 + eps**2)
+        
+        divR = div(gxR/normR, gyR/normR)
+        divG = div(gxG/normG, gyG/normG)
+        divB = div(gxB/normB, gyB/normB)
+        
+        cR = laplacian(uR - uG) + laplacian(uR - uB)
+        cG = laplacian(uG - uR) + laplacian(uG - uB)
+        cB = laplacian(uB - uR) + laplacian(uB - uG)
+        
+        u[:,:,0] += dt * (lam * (I[:,:,0] - uR) + divR + gamma * cR)
+        u[:,:,1] += dt * (lam * (I[:,:,1] - uG) + divG + gamma * cG)
+        u[:,:,2] += dt * (lam * (I[:,:,2] - uB) + divB + gamma * cB)
+        
+        u = np.clip(u, 0, 1)
+        
+        energies['R'].append(compute_energy(u, I, lam, eps, gamma, 0))
+        energies['G'].append(compute_energy(u, I, lam, eps, gamma, 1))
+        energies['B'].append(compute_energy(u, I, lam, eps, gamma, 2))
+        
+        if k in [10, 50, iters]:
+            snapshots[k] = np.copy(u)
+            
+    return u, energies, snapshots
+
+# Run simulation
+print("Starting Game-Theoretic PDE Solver...")
+denoised_image, energies, snapshots = solve_rgb_game(noisy_image, iters=300)
+print("Solver finished.")
+
+# 5. Generate Visualizations
+
+# Fig 1: Visual Comparison
+fig, ax = plt.subplots(1, 3, figsize=(15, 5))
+ax[0].imshow(clean_image); ax[0].set_title("Original Geometry"); ax[0].axis('off')
+ax[1].imshow(noisy_image); ax[1].set_title("Noisy Observation"); ax[1].axis('off')
+ax[2].imshow(denoised_image); ax[2].set_title("Nash Equilibrium State"); ax[2].axis('off')
+save_fig("fig1_image_comparison")
+
+# Fig 2: Energy Convergence
+plt.figure(figsize=(8, 5))
+plt.plot(energies['R'], label='Player R ($J_R$)', color='#e74c3c', linewidth=2)
+plt.plot(energies['G'], label='Player G ($J_G$)', color='#2ecc71', linewidth=2)
+plt.plot(energies['B'], label='Player B ($J_B$)', color='#3498db', linewidth=2)
+plt.xlabel("Iteration (Artificial Time $t$)"); plt.ylabel("Cost Functional Value")
+plt.title("Energy Dissipation of the Multi-Player Game"); plt.legend(); plt.grid(True, linestyle='--')
+save_fig("fig2_energy_convergence")
+
+# Fig 3: Temporal Evolution (NEW)
+fig, ax = plt.subplots(1, 4, figsize=(20, 5))
+titles = ["Initial ($t=0$)", "Early Game ($t=10$)", "Mid Game ($t=50$)", "Equilibrium ($t=300$)"]
+keys = [0, 10, 50, 300]
+for i in range(4):
+    ax[i].imshow(snapshots[keys[i]])
+    ax[i].set_title(titles[i])
+    ax[i].axis('off')
+save_fig("fig3_temporal_evolution")
+
+# Fig 4: Edge Alignment Map (NEW)
+def get_edge_map(img):
+    edges = np.zeros_like(img)
+    for c in range(3):
+        gx, gy = grad(img[:,:,c])
+        edges[:,:,c] = np.sqrt(gx**2 + gy**2)
+    return np.clip(edges * 3, 0, 1)  # Scale up for visibility
+
+fig, ax = plt.subplots(1, 2, figsize=(12, 6))
+ax[0].imshow(get_edge_map(noisy_image))
+ax[0].set_title("Initial Gradients (Misaligned / Chromatic Fringing)")
+ax[0].axis('off')
+ax[1].imshow(get_edge_map(denoised_image))
+ax[1].set_title("Equilibrium Gradients (Perfect White Alignment)")
+ax[1].axis('off')
+save_fig("fig4_edge_alignment")
+
+# 6. Zip and Download
+zip_filename = "Paper1_NonCooperative_Nash_V2"
+shutil.make_archive(zip_filename, 'zip', FIG_DIR)
+files.download(f"{zip_filename}.zip")
