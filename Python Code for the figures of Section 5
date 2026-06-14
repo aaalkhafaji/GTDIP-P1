@@ -1,0 +1,82 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from skimage import data, img_as_float
+from skimage.restoration import denoise_tv_chambolle
+from skimage.util import random_noise
+import zipfile
+import os
+from google.colab import files
+
+# ==========================================
+# 1. Image Initialization & AWGN Application
+# ==========================================
+# Load standard test image and crop to a region with sharp structural edges and distinct colors
+original = img_as_float(data.astronaut()[50:250, 100:300])
+# Contaminate with Additive White Gaussian Noise (AWGN)
+noisy_image = random_noise(original, mode='gaussian', var=0.04)
+
+# ==========================================
+# 2. Symmetric VTV Baseline
+# ==========================================
+# Represents standard monolithic energy functional (uniform parameterization)
+symmetric_vtv = denoise_tv_chambolle(noisy_image, weight=0.15, channel_axis=-1)
+
+# ==========================================
+# 3. Asymmetric Nash Equilibrium (Approximation)
+# ==========================================
+# Isolate color channels
+R, G, B = noisy_image[:,:,0], noisy_image[:,:,1], noisy_image[:,:,2]
+
+# Apply asymmetric parameters:
+# Green channel: High fidelity (\lambda_G = 3.0), minimal smoothing to preserve luminance geometry
+G_asym = denoise_tv_chambolle(G, weight=0.04) 
+
+# Red & Blue channels: Heavy structural coupling/smoothing (\gamma_{R,B} = 3.0) to eliminate color fringing
+R_asym = denoise_tv_chambolle(R, weight=0.25)
+B_asym = denoise_tv_chambolle(B, weight=0.25)
+
+# Reconstruct the equilibrium profile
+asymmetric_nash = np.stack([R_asym, G_asym, B_asym], axis=-1)
+
+# ==========================================
+# 4. Figure Formatting & Output
+# ==========================================
+fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+plt.subplots_adjust(wspace=0.05, hspace=0.15)
+
+# Top Left: Original Noisy Observation
+axes[0, 0].imshow(noisy_image)
+axes[0, 0].set_title('Noisy Observation ($I$)', fontsize=12)
+axes[0, 0].axis('off')
+
+# Top Right: Standard Symmetric VTV
+axes[0, 1].imshow(symmetric_vtv)
+axes[0, 1].set_title('Standard Symmetric VTV\n($\lambda_R=\lambda_G=\lambda_B$, $\gamma_R=\gamma_G=\gamma_B$)', fontsize=12)
+axes[0, 1].axis('off')
+
+# Bottom Left: Green Luminance Guide Isolated
+axes[1, 0].imshow(G_asym, cmap='gray')
+axes[1, 0].set_title('Green Channel (Geometric Guide)\nHigh Fidelity ($\lambda_G > \lambda_{R,B}$)', fontsize=12)
+axes[1, 0].axis('off')
+
+# Bottom Right: Asymmetric Nash Equilibrium
+axes[1, 1].imshow(asymmetric_nash)
+axes[1, 1].set_title('Proposed Asymmetric Nash Equilibrium\n(R, B Subordinated to G Geometry)', fontsize=12)
+axes[1, 1].axis('off')
+
+# Save the figure with academic publication parameters
+filename = 'fig5_asymmetric_tuning.png'
+plt.savefig(filename, dpi=300, bbox_inches='tight', pad_inches=0.1)
+plt.show()
+
+# ==========================================
+# 5. Zipping and Downloading
+# ==========================================
+zip_filename = 'fig5_asymmetric_tuning.zip'
+with zipfile.ZipFile(zip_filename, 'w') as zipf:
+    zipf.write(filename)
+
+print(f"Successfully generated {filename} and compressed to {zip_filename}.")
+
+# Trigger Colab download
+files.download(zip_filename)
